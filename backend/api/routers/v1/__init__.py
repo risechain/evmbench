@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 
 from .auth import router as auth_router
+from .device_auth import router as device_auth_router
 from .integration import router as integration_router
 from .jobs import router as jobs_router
 from .models import router as models_router
@@ -11,3 +12,4 @@ router.include_router(jobs_router)
 router.include_router(integration_router)
 router.include_router(auth_router)
 router.include_router(models_router)
+router.include_router(device_auth_router)

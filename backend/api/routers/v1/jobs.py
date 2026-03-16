@@ -136,23 +136,43 @@ async def start_job(
     use_proxy_tokens = settings.BACKEND_OAI_KEY_MODE == 'proxy'
     openai_key = _resolve_openai_key(form)
 
-    if not use_proxy_static and not openai_key:
-        raise HTTPException(status_code=412, detail='openai_key is required')
+    # Parse auth_tokens if provided (ChatGPT device login)
+    auth_tokens_dict: dict | None = None
+    if form.auth_tokens:
+        import json as _json
+        try:
+            auth_tokens_dict = _json.loads(form.auth_tokens)
+        except _json.JSONDecodeError:
+            raise HTTPException(status_code=412, detail='Invalid auth_tokens JSON')
 
-    await _maybe_validate_user_key(form=form, openai_key=openai_key)
+    if not use_proxy_static and not openai_key and not auth_tokens_dict:
+        raise HTTPException(status_code=412, detail='openai_key or auth_tokens is required')
+
+    if not auth_tokens_dict:
+        await _maybe_validate_user_key(form=form, openai_key=openai_key)
 
     job_id = uuid.uuid4()
     secret_ref = os.urandom(32).hex()
     result_token = os.urandom(32).hex()
 
-    openai_token, key_mode = _encode_openai_token(
-        openai_key=openai_key or '',
-        use_proxy_static=use_proxy_static,
-        use_proxy_tokens=use_proxy_tokens,
-    )
+    if auth_tokens_dict:
+        # ChatGPT device auth — use a placeholder token; the worker uses auth.json instead
+        openai_token = 'DEVICE_AUTH'
+        key_mode = 'device'
+    else:
+        openai_token, key_mode = _encode_openai_token(
+            openai_key=openai_key or '',
+            use_proxy_static=use_proxy_static,
+            use_proxy_tokens=use_proxy_tokens,
+        )
 
     try:
-        bundle = build_secret_bundle(upload=form.file, openai_token=openai_token, key_mode=key_mode)
+        bundle = build_secret_bundle(
+            upload=form.file,
+            openai_token=openai_token,
+            key_mode=key_mode,
+            auth_tokens=auth_tokens_dict,
+        )
         await secret_storage.save_secret(secret_ref, bundle)
 
         job = Job(
