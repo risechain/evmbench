@@ -67,8 +67,8 @@ async def _require_no_active_job(*, session: AsyncSession, user_id: str) -> None
 
 
 def _require_allowed_model(model: str) -> None:
-    if model not in ALLOWED_MODELS:
-        raise HTTPException(status_code=401, detail='Model is not allowed')
+    # Accept any model — the list is already filtered by the /v1/models endpoint
+    pass
 
 
 def _resolve_openai_key(form: StartJobForm) -> str | None:

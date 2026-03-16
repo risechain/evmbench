@@ -4,7 +4,7 @@ import { ArrowUpRight01Icon } from "@hugeicons/core-free-icons"
 import { HugeiconsIcon } from "@hugeicons/react"
 import Image from "next/image"
 import { useRouter } from "next/navigation"
-import { useCallback, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useState } from "react"
 import { AppFooter } from "@/components/app-footer"
 import { AppHeader } from "@/components/app-header"
 import { FileUploader } from "@/components/file-uploader"
@@ -23,6 +23,7 @@ import { useLocalStorage } from "@/hooks/use-local-storage"
 import { useSessionStorage } from "@/hooks/use-session-storage"
 import { API_BASE } from "@/lib/api"
 import { startJob } from "@/lib/jobs"
+import { fetchModels } from "@/lib/models"
 import { addRecentJob, type RecentJob } from "@/lib/recent-jobs"
 import { inferPackageName } from "@/lib/upload-utils"
 import { createZipFromFiles } from "@/lib/zip"
@@ -34,7 +35,8 @@ export default function Page() {
   const router = useRouter()
   const { files, packageName, setUpload, clearUpload } = useUploadStore()
   const [openaiKey, setOpenaiKey] = useSessionStorage("evmbench.openaiKey", "")
-  const [model, setModel] = useState("codex-gpt-5.2")
+  const [models, setModels] = useState<string[]>([])
+  const [model, setModel] = useState("")
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [submitError, setSubmitError] = useState<string | null>(null)
   const [recentJobs, setRecentJobs] = useLocalStorage<RecentJob[]>(
@@ -48,6 +50,28 @@ export default function Page() {
     keyPredefined,
   } = useAuth()
 
+  // Fetch models on mount (fallback list) and re-fetch when the user enters a key
+  useEffect(() => {
+    const controller = new AbortController()
+    const trimmed = openaiKey.trim()
+
+    // Debounce key input so we don't hit OpenAI on every keystroke
+    const delay = trimmed ? 500 : 0
+    const timer = setTimeout(() => {
+      fetchModels(trimmed || undefined, controller.signal)
+        .then((list) => {
+          setModels(list)
+          setModel((prev) => (list.includes(prev) ? prev : list[0] ?? ""))
+        })
+        .catch(() => {})
+    }, delay)
+
+    return () => {
+      clearTimeout(timer)
+      controller.abort()
+    }
+  }, [openaiKey])
+
   const fileCount = files?.length ?? 0
   const selectedLabel = useMemo(() => {
     if (packageName) return packageName
@@ -56,7 +80,7 @@ export default function Page() {
   }, [files, packageName])
 
   const canSubmit =
-    !!files && fileCount > 0 && !isSubmitting && !isAuthLoading && isAuthorized
+    !!files && fileCount > 0 && !!model && !isSubmitting && !isAuthLoading && isAuthorized
 
   const handleFilesSelected = useCallback(
     (selected: File[]) => {
@@ -224,12 +248,11 @@ export default function Page() {
                       <SelectValue placeholder="Select model" />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="codex-gpt-5.2">
-                        codex-gpt-5.2
-                      </SelectItem>
-                      <SelectItem value="codex-gpt-5.1-codex-max">
-                        codex-gpt-5.1-codex-max
-                      </SelectItem>
+                      {models.map((m) => (
+                        <SelectItem key={m} value={m}>
+                          {m}
+                        </SelectItem>
+                      ))}
                     </SelectContent>
                   </Select>
                 </div>
