@@ -160,15 +160,30 @@ def _extract_json_payload(audit_md: str) -> dict:
     return _validate_report_payload(payload)
 
 
-def _run_codex_detect(*, openai_token: str, key_mode: str) -> Path:
+def _write_codex_auth_json(*, home: Path, auth_tokens: dict) -> None:
+    """Write ChatGPT OAuth tokens so Codex uses device-auth mode."""
+    codex_dir = home / '.codex'
+    codex_dir.mkdir(parents=True, exist_ok=True)
+    auth_path = codex_dir / 'auth.json'
+    auth_path.write_text(json.dumps(auth_tokens), encoding='utf-8')
+
+
+def _run_codex_detect(*, openai_token: str, key_mode: str, auth_tokens: dict | None = None) -> Path:
     env = os.environ.copy()
-    env['OPENAI_API_KEY'] = openai_token
-    # Codex CLI supports using CODEX_API_KEY; keep it aligned to avoid surprises.
-    env['CODEX_API_KEY'] = openai_token
     env['HOME'] = str(AGENT_DIR)
     env['AGENT_DIR'] = str(AGENT_DIR)
     env['SUBMISSION_DIR'] = str(SUBMISSION_DIR)
     env['LOGS_DIR'] = str(LOGS_DIR)
+
+    if key_mode == 'device' and auth_tokens:
+        # ChatGPT device auth — write auth.json, no API key needed
+        _write_codex_auth_json(home=AGENT_DIR, auth_tokens=auth_tokens)
+        # Set dummy values so the runner script doesn't fail on required env checks
+        env['OPENAI_API_KEY'] = 'device-auth'
+        env['CODEX_API_KEY'] = 'device-auth'
+    else:
+        env['OPENAI_API_KEY'] = openai_token
+        env['CODEX_API_KEY'] = openai_token
 
     # Proxy-token mode: write Codex config to route requests through oai_proxy.
     if key_mode in {'proxy', 'proxy_static'}:
@@ -209,7 +224,7 @@ def _run_codex_detect(*, openai_token: str, key_mode: str) -> Path:
     return audit_md_path
 
 
-def _unpack_bundle(bundle: bytes, work_dir: Path) -> tuple[Path, str, str]:
+def _unpack_bundle(bundle: bytes, work_dir: Path) -> tuple[Path, str, str, dict | None]:
     upload_zip_path = work_dir / 'upload.zip'
     key_payload: dict | None = None
 
@@ -239,14 +254,16 @@ def _unpack_bundle(bundle: bytes, work_dir: Path) -> tuple[Path, str, str]:
     if not isinstance(key_mode, str):
         key_mode = 'direct'
     key_mode = key_mode.strip().lower()
-    if key_mode not in {'direct', 'proxy', 'proxy_static'}:
+    if key_mode not in {'direct', 'proxy', 'proxy_static', 'device'}:
         key_mode = 'direct'
+
+    auth_tokens = key_payload.get('auth_tokens')
 
     if not upload_zip_path.exists():
         msg = 'Missing upload.zip in bundle'
         raise RuntimeError(msg)
 
-    return upload_zip_path, openai_token, key_mode
+    return upload_zip_path, openai_token, key_mode, auth_tokens
 
 
 async def main() -> None:
@@ -268,7 +285,7 @@ async def main() -> None:
 
     with tempfile.TemporaryDirectory(prefix='evmbench-worker-') as tmpdir:
         work_dir = Path(tmpdir)
-        upload_zip_path, openai_token, key_mode = _unpack_bundle(bundle, work_dir)
+        upload_zip_path, openai_token, key_mode, auth_tokens = _unpack_bundle(bundle, work_dir)
 
         if AUDIT_DIR.exists():
             shutil.rmtree(AUDIT_DIR)
@@ -279,7 +296,7 @@ async def main() -> None:
 
         logger.info('Extracted the bundle, running detect-only agent...')
         try:
-            audit_md = _run_codex_detect(openai_token=openai_token, key_mode=key_mode)
+            audit_md = _run_codex_detect(openai_token=openai_token, key_mode=key_mode, auth_tokens=auth_tokens)
             audit_text = audit_md.read_text()
             _extract_json_payload(audit_text)
 

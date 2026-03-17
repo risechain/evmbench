@@ -16,15 +16,13 @@ set -euo pipefail
 : "${AGENT_DIR:?missing AGENT_DIR}"
 : "${SUBMISSION_DIR:?missing SUBMISSION_DIR}"
 : "${LOGS_DIR:?missing LOGS_DIR}"
-: "${OPENAI_API_KEY:?missing OPENAI_API_KEY}"
-: "${CODEX_API_KEY:?missing CODEX_API_KEY}"
 : "${CODEX_MODEL:?missing CODEX_MODEL}"
 : "${EVM_BENCH_DETECT_MD:?missing EVM_BENCH_DETECT_MD}"
 
 mkdir -p "${SUBMISSION_DIR}" "${LOGS_DIR}"
 
 # Keep runaway audits bounded by default.
-TIMEOUT_SECONDS="${EVM_BENCH_CODEX_TIMEOUT_SECONDS:-10800}"
+TIMEOUT_SECONDS="${EVM_BENCH_CODEX_TIMEOUT_SECONDS:-28800}"
 if ! [[ "${TIMEOUT_SECONDS}" =~ ^[0-9]+$ ]]; then
   echo "invalid EVM_BENCH_CODEX_TIMEOUT_SECONDS=${TIMEOUT_SECONDS}" >&2
   exit 2
@@ -39,13 +37,20 @@ rm -f "${SUBMISSION_DIR}/audit.md"
 LAUNCHER_PROMPT=$'You are an expert smart contract auditor.\nFirst read the AGENTS.md file for your detailed instructions.\nThen proceed. Ensure to follow the submission instructions exactly.'
 
 AUTH_PATH="${AGENT_DIR}/.codex/auth.json"
-if [[ ! -f "${AUTH_PATH}" ]]; then
+if [[ -f "${AUTH_PATH}" ]]; then
+  # Device auth mode — unset API key so codex uses auth.json tokens
+  unset OPENAI_API_KEY
+  unset CODEX_API_KEY
+else
   # Avoid passing the token in argv; log output for debugging.
   printf '%s\n' "${OPENAI_API_KEY}" | codex login --with-api-key > "${LOGS_DIR}/codex_login.log" 2>&1 || true
 fi
 
+REASONING_EFFORT="${EVM_BENCH_REASONING_EFFORT:-xhigh}"
+
 timeout --signal=KILL "${TIMEOUT_SECONDS}s" codex exec \
   --model "${CODEX_MODEL}" \
+  -c "model_reasoning_effort=\"${REASONING_EFFORT}\"" \
   --dangerously-bypass-approvals-and-sandbox \
   --skip-git-repo-check \
   --experimental-json \

@@ -4,7 +4,8 @@ import { ArrowUpRight01Icon } from "@hugeicons/core-free-icons"
 import { HugeiconsIcon } from "@hugeicons/react"
 import Image from "next/image"
 import { useRouter } from "next/navigation"
-import { useCallback, useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { startDeviceAuth, pollDeviceAuth, readAuthJsonFile } from "@/lib/device-auth"
 import { AppFooter } from "@/components/app-footer"
 import { AppHeader } from "@/components/app-header"
 import { FileUploader } from "@/components/file-uploader"
@@ -23,6 +24,7 @@ import { useLocalStorage } from "@/hooks/use-local-storage"
 import { useSessionStorage } from "@/hooks/use-session-storage"
 import { API_BASE } from "@/lib/api"
 import { startJob } from "@/lib/jobs"
+import type { AuthTokens } from "@/lib/device-auth"
 import { fetchModels } from "@/lib/models"
 import { addRecentJob, type RecentJob } from "@/lib/recent-jobs"
 import { inferPackageName } from "@/lib/upload-utils"
@@ -35,6 +37,16 @@ export default function Page() {
   const router = useRouter()
   const { files, packageName, setUpload, clearUpload } = useUploadStore()
   const [openaiKey, setOpenaiKey] = useSessionStorage("evmbench.openaiKey", "")
+  const [authTokens, setAuthTokens] = useState<Record<string, unknown> | null>(
+    null,
+  )
+  const authFileRef = useRef<HTMLInputElement>(null)
+  const [deviceAuthLoading, setDeviceAuthLoading] = useState(false)
+  const [deviceCode, setDeviceCode] = useState<{
+    session_id: string
+    verification_url: string
+    user_code: string
+  } | null>(null)
   const [models, setModels] = useState<string[]>([])
   const [model, setModel] = useState("")
   const [isSubmitting, setIsSubmitting] = useState(false)
@@ -58,7 +70,9 @@ export default function Page() {
     // Debounce key input so we don't hit OpenAI on every keystroke
     const delay = trimmed ? 500 : 0
     const timer = setTimeout(() => {
-      fetchModels(trimmed || undefined, controller.signal)
+      // If using device auth, fetch without a key (use fallback list)
+      const keyForFetch = authTokens ? undefined : trimmed || undefined
+      fetchModels(keyForFetch, controller.signal)
         .then((list) => {
           setModels(list)
           setModel((prev) => (list.includes(prev) ? prev : list[0] ?? ""))
@@ -70,7 +84,67 @@ export default function Page() {
       clearTimeout(timer)
       controller.abort()
     }
-  }, [openaiKey])
+  }, [openaiKey, authTokens])
+
+  const handleAuthFileChange = useCallback(
+    async (event: React.ChangeEvent<HTMLInputElement>) => {
+      const file = event.target.files?.[0]
+      if (!file) return
+      setSubmitError(null)
+      try {
+        const tokens = await readAuthJsonFile(file)
+        setAuthTokens(tokens)
+      } catch (error) {
+        setSubmitError(
+          error instanceof Error ? error.message : "Invalid auth.json",
+        )
+      }
+      event.target.value = ""
+    },
+    [],
+  )
+
+  const handleDeviceAuth = useCallback(async () => {
+    setDeviceAuthLoading(true)
+    setSubmitError(null)
+    try {
+      const session = await startDeviceAuth()
+      setDeviceCode(session)
+
+      // Poll for completion
+      const poll = async () => {
+        for (let i = 0; i < 180; i++) {
+          await new Promise((r) => setTimeout(r, 2000))
+          try {
+            const result = await pollDeviceAuth(session.session_id)
+            if (result.status === "complete" && result.auth_tokens) {
+              setAuthTokens(result.auth_tokens)
+              setDeviceCode(null)
+              setDeviceAuthLoading(false)
+              return
+            }
+            if (result.status === "error") {
+              setSubmitError(result.error ?? "Device auth failed")
+              setDeviceCode(null)
+              setDeviceAuthLoading(false)
+              return
+            }
+          } catch {
+            // Network error, keep polling
+          }
+        }
+        setSubmitError("Device auth timed out")
+        setDeviceCode(null)
+        setDeviceAuthLoading(false)
+      }
+      poll()
+    } catch (error) {
+      setSubmitError(
+        error instanceof Error ? error.message : "Failed to start device auth",
+      )
+      setDeviceAuthLoading(false)
+    }
+  }, [])
 
   const fileCount = files?.length ?? 0
   const selectedLabel = useMemo(() => {
@@ -79,8 +153,15 @@ export default function Page() {
     return null
   }, [files, packageName])
 
+  const hasCredentials = !!openaiKey.trim() || !!authTokens || keyPredefined
   const canSubmit =
-    !!files && fileCount > 0 && !!model && !isSubmitting && !isAuthLoading && isAuthorized
+    !!files &&
+    fileCount > 0 &&
+    !!model &&
+    hasCredentials &&
+    !isSubmitting &&
+    !isAuthLoading &&
+    isAuthorized
 
   const handleFilesSelected = useCallback(
     (selected: File[]) => {
@@ -110,7 +191,12 @@ export default function Page() {
     try {
       const name = selectedLabel ?? "files"
       const zipFile = await createZipFromFiles(files, name)
-      const response = await startJob(zipFile, model, trimmedKey)
+      const response = await startJob(
+        zipFile,
+        model,
+        trimmedKey,
+        authTokens ?? undefined,
+      )
       // Persist locally so users can navigate back without server-side auth/history.
       const next = addRecentJob({
         job_id: response.job_id,
@@ -221,19 +307,93 @@ export default function Page() {
               <div className="grid gap-3 text-xs text-muted-foreground">
                 {!isConfigLoading && !keyPredefined && (
                   <div className="grid gap-1">
-                    <Label
-                      htmlFor="openai-key"
-                      className="text-xs text-foreground"
-                    >
-                      OpenAI API Key
-                    </Label>
-                    <Input
-                      id="openai-key"
-                      type="password"
-                      placeholder="sk-&hellip;"
-                      value={openaiKey}
-                      onChange={handleKeyChange}
-                    />
+                    {authTokens ? (
+                      <div className="flex items-center justify-between rounded-md border px-3 py-2">
+                        <span className="text-xs text-foreground">
+                          Logged in with ChatGPT
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setAuthTokens(null)}
+                          className="text-xs text-muted-foreground hover:text-foreground"
+                        >
+                          Disconnect
+                        </button>
+                      </div>
+                    ) : deviceCode ? (
+                      <div className="grid gap-2 rounded-md border p-3">
+                        <span className="text-xs text-foreground font-medium">
+                          Login with ChatGPT
+                        </span>
+                        <p className="text-xs text-muted-foreground leading-relaxed">
+                          Open the link below and enter the code:
+                        </p>
+                        <div className="flex items-center justify-center rounded bg-muted px-3 py-2">
+                          <code className="text-lg font-mono font-bold tracking-widest text-foreground">
+                            {deviceCode.user_code}
+                          </code>
+                        </div>
+                        <a
+                          href={deviceCode.verification_url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-xs text-foreground underline underline-offset-2 hover:text-primary truncate"
+                        >
+                          {deviceCode.verification_url}
+                        </a>
+                        <span className="text-xs text-muted-foreground animate-pulse">
+                          Waiting for login...
+                        </span>
+                      </div>
+                    ) : (
+                      <>
+                        <Label
+                          htmlFor="openai-key"
+                          className="text-xs text-foreground"
+                        >
+                          OpenAI API Key
+                        </Label>
+                        <Input
+                          id="openai-key"
+                          type="password"
+                          placeholder="sk-&hellip;"
+                          value={openaiKey}
+                          onChange={handleKeyChange}
+                        />
+                        <div className="flex items-center gap-2">
+                          <div className="h-px flex-1 bg-border" />
+                          <span className="text-xs text-muted-foreground">
+                            or
+                          </span>
+                          <div className="h-px flex-1 bg-border" />
+                        </div>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={handleDeviceAuth}
+                          disabled={deviceAuthLoading}
+                          className="w-full"
+                        >
+                          {deviceAuthLoading
+                            ? "Starting login..."
+                            : "Login with ChatGPT"}
+                        </Button>
+                        <input
+                          ref={authFileRef}
+                          type="file"
+                          accept=".json"
+                          onChange={handleAuthFileChange}
+                          className="hidden"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => authFileRef.current?.click()}
+                          className="text-xs text-muted-foreground hover:text-foreground underline underline-offset-2"
+                        >
+                          or upload auth.json
+                        </button>
+                      </>
+                    )}
                   </div>
                 )}
                 <div className="grid gap-1">

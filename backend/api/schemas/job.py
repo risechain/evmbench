@@ -15,6 +15,7 @@ class StartJobForm(BaseModel):
 
     model: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
     openai_key: Annotated[str | None, StringConstraints(strip_whitespace=True, min_length=1)]
+    auth_tokens: str | None = None  # JSON-encoded ChatGPT OAuth tokens
     file: UploadFile
 
     @classmethod
@@ -23,9 +24,10 @@ class StartJobForm(BaseModel):
         model: Annotated[str, Form()],
         file: Annotated[UploadFile, File()],
         openai_key: Annotated[str | None, Form()] = None,
+        auth_tokens: Annotated[str | None, Form()] = None,
     ) -> 'StartJobForm':
         try:
-            return cls(model=model, openai_key=openai_key, file=file)
+            return cls(model=model, openai_key=openai_key, auth_tokens=auth_tokens, file=file)
         except ValidationError as exc:
             # TODO(es3n1n): this is **very** bad
             errors = exc.errors()
@@ -47,6 +49,9 @@ class StartJobForm(BaseModel):
     def require_openai_key(self) -> 'StartJobForm':
         # Skip validation if using proxy's static key or backend's static key
         if settings.BACKEND_USE_PROXY_STATIC_KEY:
+            return self
+        # auth_tokens (ChatGPT device login) is an alternative to openai_key
+        if self.auth_tokens:
             return self
         if settings.BACKEND_STATIC_OAI_KEY is None and not self.openai_key:
             msg = 'openai_key is required'

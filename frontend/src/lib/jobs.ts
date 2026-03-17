@@ -95,11 +95,15 @@ export async function startJob(
   file: File,
   model: string,
   openaiKey: string,
+  authTokens?: Record<string, unknown>,
 ): Promise<StartJobResponse> {
   const body = new FormData()
   body.append("file", file)
   body.append("model", model)
   body.append("openai_key", openaiKey)
+  if (authTokens) {
+    body.append("auth_tokens", JSON.stringify(authTokens))
+  }
 
   const response = await fetch(`${API_BASE}/v1/jobs/start`, {
     method: "POST",
